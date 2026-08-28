@@ -1,0 +1,27 @@
+# Build output
+/kestrel-rs/target/
+/kestrel-rs/dist/
+
+# Vendored toolchain and the ffmpeg build tree. build-ffmpeg.sh reproduces
+# both from source; together they are several gigabytes and are entirely
+# derived, so they are rebuilt rather than tracked.
+/kestrel-rs/vendor/build/
+/kestrel-rs/vendor/prefix/
+/kestrel-rs/vendor/toolchain/
+# appimage.sh downloads appimagetool on first use.
+/kestrel-rs/vendor/tools/
+
+# Python: only the brand-asset generator remains
+__pycache__/
+*.py[cod]
+
+# Local runtime state. Device credentials live in the OS keyring and the
+# config in ~/.config/kestrel; neither belongs in the repository.
+config.json
+*.log
+
+# Editors and desktop cruft
+.vscode/
+.idea/
+*.swp
+.DS_Store

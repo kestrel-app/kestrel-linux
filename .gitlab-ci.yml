@@ -1,0 +1,150 @@
+# Guards what this repository publishes. The project is released to GitHub by
+# the manual publish job below, not by a mirror.
+#
+
+stages:
+  - validate
+  - publish
+  - release
+
+# ---------------------------------------------------------------------------
+# Sensitive information, and publishing to GitHub.
+#
+# The automatic GitLab-to-GitHub mirror is deliberately OFF for this project. A
+# mirror publishes when a push lands rather than when a pipeline passes, so
+# nothing - no job, no reviewer - can stand between a commit and the world.
+# Publication is the manual job below instead: somebody reads the check, then
+# clicks. What gets published is one parentless commit holding the tree of
+# HEAD, so the internal history stays on GitLab. See tools/publish-public.sh.
+#
+# Set these once, in Settings > CI/CD > Variables:
+#   GITHUB_REPO     owner/name of the public repository
+#   GITHUB_TOKEN    a PAT with contents:write AND workflows:write, because the
+#                   published tree contains .github/workflows and GitHub refuses
+#                   any push that touches those without it  (masked AND protected)
+#   PUBLISH_NAME    the name public commits are authored as
+#   PUBLISH_EMAIL   e.g. 1234+you@users.noreply.github.com
+#
+# python:3.13 rather than -slim: the slim image has no git, and both jobs need
+# it. One image pull is cheaper than apt-get on every pipeline.
+# ---------------------------------------------------------------------------
+
+build:
+  stage: validate
+  variables:
+    # The runner is a shell executor and reuses this working directory between
+    # jobs. GitLab's default clean flags are -ffdx, and the x deletes ignored
+    # files as well - which here means vendor/prefix and target/, the vendored
+    # ffmpeg and every compiled crate. Dropping the x keeps them: the first
+    # pipeline builds ffmpeg once, later ones are incremental cargo builds.
+    GIT_CLEAN_FLAGS: "-ffd"
+    CARGO_TERM_COLOR: "always"
+  before_script:
+    # rustup installs into ~/.cargo and puts it on PATH by editing the shell
+    # profile - which a non-interactive CI shell never reads. Naming it here
+    # means a plain `rustup` install as the gitlab-runner user is enough, with
+    # nothing to install system-wide. Harmless if cargo is already on PATH.
+    - export PATH="$HOME/.cargo/bin:$PATH"
+    # Links target/ and the vendored ffmpeg and toolchain to a cache in $HOME.
+    # GIT_CLEAN_FLAGS above is not enough on its own: it does not survive the
+    # job landing in a different concurrency slot, which has its own build
+    # directory and so its own cold cache.
+    - kestrel-rs/ci-cache.sh
+  script:
+    # Up front, because "linker `cc` not found" three minutes into a build is a
+    # worse way to learn the machine is missing a compiler.
+    - kestrel-rs/ci-preflight.sh
+    - kestrel-rs/build.sh test
+
+check-public:
+  stage: validate
+  image: python:3.13
+  variables:
+    GIT_DEPTH: 0          # a merge request is diffed against its target
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+  script:
+    # On a merge request, check what the merge request adds. Checking the whole
+    # tree there would fail on everything the repository already carries, and a
+    # job that is red before you start is one nobody reads - but nothing new
+    # gets to land. On a branch, check the tree as it stands.
+    - |
+      if [ -n "${CI_MERGE_REQUEST_TARGET_BRANCH_NAME:-}" ]; then
+        git fetch -q origin "$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+        python3 tools/check-public.py \
+          --range "origin/${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}..HEAD"
+      else
+        python3 tools/check-public.py
+      fi
+
+publish-to-github:
+  stage: publish
+  image: python:3.13
+  when: manual              # the gate: a human has to choose to publish
+  allow_failure: false
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  script:
+    # publish-public.sh runs the check itself before it builds anything, so
+    # clicking this cannot publish something the check would have rejected.
+    - tools/publish-public.sh "https://github.com/${GITHUB_REPO}.git"
+
+# ---------------------------------------------------------------------------
+# The built artifact, attached to a GitHub release.
+#
+# Separate from publish-to-github and downstream of it: the release is tagged
+# against whatever the published branch points at, so publishing the source has
+# to have happened first. `needs` enforces that - until publish-to-github has
+# run, this one is not offered.
+#
+# Manual for the same reason publishing is: a binary on a release page is as
+# public as the source, and just as hard to take back.
+# ---------------------------------------------------------------------------
+
+release-to-github:
+  stage: release
+  when: manual
+  allow_failure: false
+  needs: ["publish-to-github"]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  variables:
+    GIT_CLEAN_FLAGS: "-ffd"
+  before_script:
+    - export PATH="$HOME/.cargo/bin:$PATH"
+    - kestrel-rs/ci-cache.sh
+  script:
+    # --release additionally requires the zig cross-linker, without which the
+    # build quietly pins the glibc floor to this runner's.
+    - kestrel-rs/ci-preflight.sh --release
+    # Build once, package twice. Each script builds on its own so it is usable
+    # by hand, and left to themselves they would each run a release build -
+    # which measurably costs the second one the full time again rather than the
+    # no-op a warm target/ suggests.
+    - kestrel-rs/build.sh build --release
+    - KESTREL_SKIP_BUILD=1 kestrel-rs/package.sh
+    - KESTREL_SKIP_BUILD=1 kestrel-rs/appimage.sh
+    - |
+      VERSION="$(grep -m1 '^version' kestrel-rs/Cargo.toml | cut -d'"' -f2)"
+      cd kestrel-rs/dist
+
+      # Uploaded under names that do not carry the version, because the site
+      # links to /releases/latest/download/<name> and that only resolves if the
+      # name is the same in every release. The tag carries the version instead.
+      cp "Kestrel-$VERSION-x86_64.AppImage" Kestrel-x86_64.AppImage
+      cp "kestrel-$VERSION-x86_64.tar.gz"   kestrel-x86_64.tar.gz
+      sha256sum Kestrel-x86_64.AppImage kestrel-x86_64.tar.gz > SHA256SUMS
+
+      cd "$CI_PROJECT_DIR"
+      tools/github-release.py "v$VERSION" \
+        kestrel-rs/dist/Kestrel-x86_64.AppImage \
+        kestrel-rs/dist/kestrel-x86_64.tar.gz \
+        kestrel-rs/dist/SHA256SUMS
+  artifacts:
+    # Kept on the GitLab side too, so a failed upload does not mean a rebuild.
+    paths:
+      - kestrel-rs/dist/Kestrel-x86_64.AppImage
+      - kestrel-rs/dist/kestrel-x86_64.tar.gz
+      - kestrel-rs/dist/SHA256SUMS
+    expire_in: 30 days
