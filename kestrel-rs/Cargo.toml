@@ -1,0 +1,48 @@
+[package]
+name = "kestrel"
+version = "0.1.0"
+edition = "2021"
+description = "Live camera wall and PTZ control for your NVR"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+[dependencies]
+ureq = { version = "2", features = ["json", "tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+percent-encoding = "2"
+log = "0.4"
+env_logger = "0.11"
+ffmpeg-next = "7.1"
+eframe = "0.31"
+keyring = { version = "3", features = ["async-secret-service", "crypto-rust", "async-io"] }
+dirs = "6.0.0"
+# JPEG as well as PNG: the radar basemap tiles come out of Esri's tile cache,
+# which serves the canvas styles as JPEG. See weather::radar::is_image.
+image = { version = "0.25.9", default-features = false, features = ["png", "jpeg"] }
+signal-hook = "0.4.4"
+libloading = "0.8"
+base64 = "0.23.0"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+# ONVIF speaks namespaced SOAP, where the same element arrives as tds:, trt: or
+# tptz: depending on the device. Finding fields by string search - which is the
+# right call for QNAP's two-field login, and says so there - does not survive
+# that. Pure Rust, no dependencies of its own, MIT/Apache like the rest.
+roxmltree = "0.21"
+# Already compiled into the tree behind rustls; taken directly for the SHA-1 and
+# the nonce that ONVIF's WS-Security password digest is built from. SHA-1 is not
+# a choice here - the ONVIF specification names it. See api::vendor::onvif.
+ring = "0.17"
+# Already in the tree behind the keyring's secret-service backend; taken
+# directly so the screen can be kept awake, which needs a bus connection that
+# outlives the call. See src/power.rs.
+zbus = { version = "4", default-features = false, features = ["async-io"] }
+
+[profile.release]
+# A distributed binary wants size and speed over build time.
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
