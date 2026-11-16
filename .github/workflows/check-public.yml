@@ -1,0 +1,29 @@
+# The same sensitive-information check the GitLab pipeline runs, for pull
+# requests opened here. tools/check-public.py is the one implementation; this
+# only decides what to point it at.
+name: check-public
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  check-public:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # a pull request is diffed against its base
+
+      - name: Check for sensitive information
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # What the pull request adds, rather than everything the repository
+            # already carries - otherwise every contributor's first PR is red
+            # for reasons that are not theirs.
+            python3 tools/check-public.py \
+              --range "origin/${{ github.base_ref }}..HEAD"
+          else
+            python3 tools/check-public.py
+          fi
